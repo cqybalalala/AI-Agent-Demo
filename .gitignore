@@ -1,0 +1,20 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# App data / runtime
+history.db
+streamlit.log
+attachments/
+
+# OS / editor / tooling
+.DS_Store
+.vscode/
+.idea/
+.claude/

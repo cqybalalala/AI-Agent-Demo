@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: sans-serif;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 2px;
+  }
+  #btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: 1px solid #555;
+    border-radius: 6px;
+    background: #1e1e1e;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+    user-select: none;
+  }
+  #btn:hover { background: #2a2a2a; border-color: #888; }
+  #btn.listening {
+    background: #3b1010;
+    border-color: #e05252;
+    color: #f88;
+    animation: pulse 1s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.6; }
+  }
+  #dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #666;
+    flex-shrink: 0;
+  }
+  #btn.listening #dot { background: #e05252; }
+  #status {
+    font-size: 11px;
+    color: #888;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #status.interim { color: #aaa; font-style: italic; }
+</style>
+</head>
+<body>
+
+<button id="btn">
+  <span id="dot"></span>
+  <span id="label">Start Speaking</span>
+</button>
+<span id="status"></span>
+
+<script>
+  // ── Streamlit component handshake ─────────────────────────────────────────
+  function sendMessage(type, data = {}) {
+    window.parent.postMessage(
+      { isStreamlitMessage: true, type, ...data },
+      "*"
+    );
+  }
+  function sendValue(value) {
+    sendMessage("streamlit:setComponentValue", { value, dataType: "json" });
+  }
+  sendMessage("streamlit:componentReady", { apiVersion: 1 });
+  sendMessage("streamlit:setFrameHeight", { height: 44 });
+
+  // ── Elements ──────────────────────────────────────────────────────────────
+  const btn    = document.getElementById("btn");
+  const label  = document.getElementById("label");
+  const status = document.getElementById("status");
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    label.textContent = "Not supported";
+    btn.disabled = true;
+    status.textContent = "Use Chrome or Edge";
+  } else {
+
+    // ── Dual-buffer state (ARIA pattern) ──────────────────────────────────
+    let recognition       = null;
+    let isRecording       = false;
+    let currentTranscript = "";   // accumulated finals
+    let latestInterim     = "";   // latest interim (replaced each frame)
+    let silenceTimer      = null;
+    const SILENCE_MS      = 1800; // auto-stop after 1.8 s silence
+
+    function initRecognition() {
+      recognition = new SR();
+      recognition.continuous      = true;
+      recognition.interimResults  = true;
+      recognition.maxAlternatives = 1;
+      recognition.lang            = "en-US";
+
+      recognition.onresult = e => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const t = e.results[i][0].transcript;
+          if (e.results[i].isFinal) {
+            currentTranscript += (currentTranscript && !currentTranscript.endsWith(" ") ? " " : "") + t.trim();
+            latestInterim = "";
+          } else {
+            latestInterim = t;
+          }
+        }
+
+        const display = latestInterim
+          ? currentTranscript + (currentTranscript ? " " : "") + latestInterim
+          : currentTranscript;
+
+        status.textContent = display || "Listening…";
+        status.className   = latestInterim ? "interim" : "";
+
+        // Restart silence countdown on every speech event
+        clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          if (isRecording && (currentTranscript.trim() || latestInterim.trim())) {
+            stopAndSend();
+          }
+        }, SILENCE_MS);
+      };
+
+      // Chrome auto-stops after silence — restart if still recording
+      recognition.onend = () => {
+        if (isRecording) {
+          try { recognition.start(); } catch {}
+        }
+      };
+
+      recognition.onerror = e => {
+        if (e.error === "no-speech") return;
+        if (e.error === "not-allowed") {
+          status.textContent = "Mic access denied";
+          status.className = "";
+          stopUI();
+        }
+      };
+    }
+
+    function startUI() {
+      btn.classList.add("listening");
+      label.textContent  = "Stop";
+      status.textContent = "Listening…";
+      status.className   = "interim";
+    }
+
+    function stopUI() {
+      btn.classList.remove("listening");
+      label.textContent = "Start Speaking";
+      status.className  = "";
+    }
+
+    function stopAndSend() {
+      if (!isRecording) return;
+      isRecording = false;
+      clearTimeout(silenceTimer);
+      // Merge any remaining interim into finals
+      const final = (currentTranscript + (latestInterim ? " " + latestInterim : "")).trim();
+      try { recognition.stop(); } catch {}
+      stopUI();
+      if (final) {
+        status.textContent = final;
+        sendValue(final);
+      } else {
+        status.textContent = "";
+        sendValue(null);
+      }
+    }
+
+    btn.addEventListener("click", () => {
+      if (isRecording) {
+        stopAndSend();
+      } else {
+        if (!recognition) initRecognition();
+        currentTranscript = "";
+        latestInterim     = "";
+        isRecording       = true;
+        sendValue(null);  // clear previous value on Streamlit side
+        startUI();
+        try { recognition.start(); } catch(e) { console.warn(e); }
+      }
+    });
+  }
+</script>
+</body>
+</html>
