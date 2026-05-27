@@ -19,31 +19,6 @@ You drop in payment proofs (PDF / image, any currency); for each one the agent *
 
 ---
 
-## 🖼️ Screenshots
-
-
-![Treasury Agent home screen: chat panel on the right, sidebar with the model picker, bank-statement settings, and the payment-proof upload box](docs/img/01-home.png)
-*Home screen — chat + sidebar (model picker, bank statement settings, document upload).*
-
-![Three-way reconciliation card comparing the payment proof, the matched ERPNext invoice, and the bank statement line, with a confidence score](docs/img/02-three-way.png)
-*Three-way match card: proof vs invoice vs bank, with confidence.*
-
-![Human-in-the-loop confirmation card asking the user to Confirm or Cancel before a Payment Entry is created](docs/img/03-approval.png)
-*Human approval gate — nothing is posted to ERPNext without a click.*
-
-![A generated Reconciliation Report PDF showing invoice, FX rate, losses and the Payment Entry number](docs/img/04-report.png)
-*Auto-generated, downloadable Reconciliation Report (PDF).*
-
-![A Discrepancy Summary PDF explaining why a payment could not be reconciled](docs/img/05-discrepancy.png)
-*Discrepancy Summary for a payment that needs human review.*
-
-![A bar chart of weekly foreign-exchange gain/loss generated from the ERPNext general ledger](docs/img/06-forex-chart.png)
-*Analytics — “show me this week’s forex loss” renders a chart.*
-
-![The created Payment Entry inside ERPNext with the payment proof attached as a file](docs/img/07-erpnext-pe.png)
-*Proof it’s real — the posted Payment Entry in ERPNext, proof attached.*
-
----
 
 ## 🏗️ Architecture
 
@@ -126,18 +101,26 @@ Then install packages:
 pip install -r requirements.txt
 ```
 
+### 2. Set up API keys
+
+Copy the example env file and fill in your API keys:
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+```
+OPENROUTER_API_KEY=your_key_here
+CHUTES_API_KEY=your_key_here
+```
+
+> Need the keys? Contact **cqyyy1018@gmail.com** or **Discord: cqybalala** and I'll provide them promptly.
+
 ### 3. Configure
-All settings live in **`config.py`**. The repo ships with working values, but verify:
 
-| Setting | What it is |
-|---|---|
-| `ERPNEXT_URL` | ERPNext base URL — currently the **Cloudflare tunnel** to my home-lab server |
-| `ERPNEXT_API_KEY` / `ERPNEXT_SECRET` | ERPNext API credentials |
-| `MODELS` / `DEFAULT_MODEL` | LLM options for the sidebar picker — **default is OpenRouter (recommended)** |
-| `BANK_STATEMENT_SHEET_URL` | Public Google Sheet used as the bank statement feed |
-| `ERPNEXT_COMPANY` | Company the Payment Entries are booked under |
+All other settings (ERPNext URL, credentials, company, bank statement) are already set in **`config.py`** — no changes needed.
 
-> 🔐 **Credentials (for reviewers)** — everything needed to run and inspect the system:
+> 🔐 **Credentials (for reviewers)**:
 >
 > | Item | Value |
 > |---|---|
@@ -147,17 +130,23 @@ All settings live in **`config.py`**. The repo ships with working values, but ve
 > | ERPNext API secret | `9b34ec3b96f507e` |
 > | Company | `Penang Components Sdn Bhd` |
 > | Bank statement (Google Sheet) | `https://docs.google.com/spreadsheets/d/1gTz-uJPGNDNkhP_rtZMWUfVO_duphO3lqnAInOgG8ys/edit?usp=sharing` |
->
-> All of the above are already set in `config.py` — listed here for convenience.
-> The **OpenRouter** and **Chutes (sponsor)** LLM API keys are not published (billed/private). If you need them to run the app, please contact me at **cqyyy1018@gmail.com** or **Discord: cqybalala** and I'll provide them promptly.
 
 ### 4. Run
 ```bash
 streamlit run app.py
 ```
-Then open **http://localhost:8501**, sign in, and select a model from the sidebar **Model** picker:
+
+### 5. Select a model
+
+In the sidebar **Model** picker:
 - **”Qwen3-VL 32B · OpenRouter”** ← recommended (fast, most stable, best tested)
 - **”Qwen3.6-27B · Chutes (sponsor)”** ← available but not well-tested; may be slower or less reliable
+
+### 6. Log in to ERPNext
+
+When the app opens at **http://localhost:8501**, sign in with:
+- **Username:** `accountant@gmail.com`
+- **Password:** `Admin-123`
 
 ---
 
