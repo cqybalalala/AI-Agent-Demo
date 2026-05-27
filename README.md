@@ -157,7 +157,16 @@ When the app opens at **http://localhost:8501**, sign in with:
 3. Watch the agent **extract → match → show a confidence score**.
 4. Click **Confirm** on the approval card → a **Payment Entry** is created in ERPNext and a **Reconciliation Report PDF** appears.
 5. Upload a proof that doesn’t match → get a **Discrepancy Summary PDF**.
-6. Ask in chat: **”show me this week’s forex loss”** → a chart; **”list overdue invoices”** → a table.
+6. Try these **analytics prompts** in chat:
+
+| Prompt | What you get |
+|---|---|
+| `show me this week’s forex loss` | Bar chart of FX gain/loss by day |
+| `show me this month’s forex loss` | Monthly FX summary chart |
+| `list overdue invoices` | Table of unpaid invoices past due date |
+| `show me all sales invoices this month` | Sales invoice table |
+| `what is our total accounts receivable` | AR summary |
+| `show purchase orders this month` | Procurement overview |
 
 > 🧪 **Sample payment proofs** for testing are included in the `samples/` folder:
 > - `GoodTransaction.png` — SGD 774.00 from NVIDIA SINGAPORE (should reconcile ✅)
