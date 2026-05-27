@@ -517,7 +517,7 @@ def _html_to_pdf(html: str) -> bytes:
 
 def _rows_html(rows: list) -> str:
     return "".join(
-        f"<tr><td class='k'>{k}</td><td class='v'>{'' if v is None else v}</td></tr>"
+        f"<tr><td class='k' width='160'>{k}</td><td class='v' width='220'>{'' if v is None else v}</td></tr>"
         for k, v in rows if v not in (None, "")
     )
 
@@ -527,10 +527,10 @@ _PDF_CSS = """
   h1 { font-size: 17pt; margin: 0 0 2pt 0; }
   .sub { color: #64748b; font-size: 9pt; margin-bottom: 10pt; }
   .badge { font-size: 10pt; font-weight: bold; padding: 2pt 6pt; border-radius: 4pt; }
-  table { width: 100%; border-collapse: collapse; margin-top: 6pt; }
-  td { padding: 5pt 4pt; border-bottom: 1px solid #e2e8f0; font-size: 10pt; vertical-align: top; }
-  td.k { color: #64748b; width: 40%; }
-  td.v { font-weight: 600; }
+  table { border-collapse: collapse; margin-top: 6pt; }
+  td { padding: 5pt 8pt; border-bottom: 1px solid #e2e8f0; font-size: 10pt; vertical-align: top; }
+  td.k { color: #64748b; min-width: 160pt; max-width: 160pt; }
+  td.v { font-weight: 600; min-width: 220pt; }
   .foot { color: #94a3b8; font-size: 8pt; margin-top: 14pt; }
 </style>
 """
