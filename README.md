@@ -79,6 +79,8 @@ Installed via `requirements.txt`:
 
 ## 🚀 Setup & Run
 
+> 📹 **Setup walkthrough video** (not a demo — step-by-step install guide): [Watch on Google Drive](https://drive.google.com/file/d/12or4vm2sXoMYlLmf4B3pfdYYWPPClHS_/view?usp=sharing)
+
 ### 1. Install dependencies
 ```bash
 # (recommended) create a virtual environment
