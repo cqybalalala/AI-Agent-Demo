@@ -21,7 +21,6 @@ You drop in payment proofs (PDF / image, any currency); for each one the agent *
 
 ## 🖼️ Screenshots
 
-> _Reviewer note: drop the real screenshots into `docs/img/` using the filenames below._
 
 ![Treasury Agent home screen: chat panel on the right, sidebar with the model picker, bank-statement settings, and the payment-proof upload box](docs/img/01-home.png)
 *Home screen — chat + sidebar (model picker, bank statement settings, document upload).*
@@ -105,20 +104,25 @@ Installed via `requirements.txt`:
 
 ## 🚀 Setup & Run
 
-### 1. Get the code
-```bash
-cd erpnext-agent
-```
-
-### 2. Install dependencies
+### 1. Install dependencies
 ```bash
 # (recommended) create a virtual environment
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
+```
 
+**Windows** (PowerShell — run this once if activation is blocked):
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.venv\Scripts\activate
+```
+
+**macOS/Linux:**
+```bash
+source .venv/bin/activate
+```
+
+Then install packages:
+```bash
 pip install -r requirements.txt
 ```
 
@@ -145,7 +149,7 @@ All settings live in **`config.py`**. The repo ships with working values, but ve
 > | Bank statement (Google Sheet) | `https://docs.google.com/spreadsheets/d/1gTz-uJPGNDNkhP_rtZMWUfVO_duphO3lqnAInOgG8ys/edit?usp=sharing` |
 >
 > All of the above are already set in `config.py` — listed here for convenience.
-> The **OpenRouter** and **Chutes (sponsor)** LLM API keys are intentionally **not published** (billed/private); the OpenRouter key is already configured in `config.py`, so no action is needed.
+> The **OpenRouter** and **Chutes (sponsor)** LLM API keys are not published (billed/private). If you need them to run the app, please contact me at **cqyyy1018@gmail.com** or **Discord: cqybalala** and I'll provide them promptly.
 
 ### 4. Run
 ```bash
