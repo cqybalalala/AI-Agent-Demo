@@ -163,12 +163,12 @@ When the app opens at **http://localhost:8501**, sign in with:
 
 | Prompt | What you get |
 |---|---|
-| `show me this week’s forex loss` | Bar chart of FX gain/loss by day |
-| `show me this month’s forex loss` | Monthly FX summary chart |
-| `list overdue invoices` | Table of unpaid invoices past due date |
-| `show me all sales invoices this month` | Sales invoice table |
-| `what is our total accounts receivable` | AR summary |
-| `show purchase orders this month` | Procurement overview |
+| `Show me forex loss and profit this week` | Bar chart of FX gain/loss by day |
+| `Show me all outstanding sales invoices` | Table of unpaid sales invoices |
+| `What is our total accounts receivable` | AR summary |
+| `Show a pie chart of our outstanding receivables grouped by currency` | Currency breakdown pie chart |
+| `What should we do to reduce the forex loss?` | AI-generated treasury recommendations |
+| `How much is the bank charge/forex expense in ACC-PAY-2026-00969?` | FX loss breakdown for a specific Payment Entry |
 
 > 🧪 **Sample payment proofs** for testing are included in the `samples/` folder:
 > - `GoodTransaction.png` — SGD 774.00 from NVIDIA SINGAPORE (should reconcile ✅)
