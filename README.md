@@ -155,7 +155,9 @@ All settings live in **`config.py`**. The repo ships with working values, but ve
 ```bash
 streamlit run app.py
 ```
-Then open **http://localhost:8501**, sign in, and confirm the sidebar **Model** picker shows **“Qwen3-VL 32B · OpenRouter”**.
+Then open **http://localhost:8501**, sign in, and select a model from the sidebar **Model** picker:
+- **”Qwen3-VL 32B · OpenRouter”** ← recommended (fast)
+- **”Qwen3.6-27B · Chutes (sponsor)”** ← also works, slightly slower
 
 ---
 
