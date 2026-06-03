@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -323,15 +324,18 @@ def render_confirmation_card(pending: dict, erp, conversation: list):
                     except Exception:
                         pass
                 # Auto-generate the Reconciliation Report (don't rely on the model to call it).
-                # Pass forex/bank_charge from the create result — for a foreign payment the
-                # forex JV isn't posted until the PE is submitted, and the bank charge lives
-                # in a separate Journal Entry, so the figures can't always be read back yet.
+                # Pass the PROJECTED forex figures from the create result — the PE is still a
+                # draft here, so its GL / linked Exchange-Gain/Loss JV don't exist yet. Both the
+                # PE-side spread (pe_forex) and the invoice-vs-payment movement (jv_forex) are
+                # deterministic and will match the ledger once the user submits in ERPNext.
                 tw = st.session_state.get("three_way_result") or {}
                 rep = execute_tool("generate_reconciliation_report", {
                     "payment_entry": pe_name,
                     "confidence":    tw.get("confidence"),
                     "match_method":  tw.get("match_method"),
                     "forex":         result.get("forex"),
+                    "pe_forex":      result.get("pe_forex"),
+                    "jv_forex":      result.get("jv_forex"),
                     "bank_charge":   result.get("bank_charge"),
                 }, erp)
                 if rep.get("_type"):
@@ -870,20 +874,39 @@ def _render_chart(chart: dict):
     values = datasets[0].get("values", [])
     color  = datasets[0].get("color", "#60a5fa")
     ylabel = datasets[0].get("label", "")
-    if currency:
-        ylabel = f"{ylabel} ({currency})"
+    axlabel = f"{ylabel} ({currency})" if currency else ylabel
+    multi = len(datasets) > 1
 
-    if ctype == "line":
-        fig = px.line(x=labels, y=values, title=title, labels={"x": "", "y": ylabel}, markers=True)
-        fig.update_traces(line_color=color)
-    elif ctype in ("pie", "donut"):
+    if ctype in ("pie", "donut"):
         fig = px.pie(names=labels, values=values, title=title, hole=0.4 if ctype == "donut" else 0)
+    elif multi:
+        # Several series on the same axis (e.g. PE forex vs cross-table JV forex). Draw one
+        # trace per dataset; stack them when the chart asks for it, otherwise group side by side.
+        horizontal = ctype == "horizontal-bar"
+        fig = go.Figure()
+        for ds in datasets:
+            vals, lbl, col = ds.get("values", []), ds.get("label", ""), ds.get("color")
+            if ctype == "line":
+                fig.add_trace(go.Scatter(x=labels, y=vals, mode="lines+markers",
+                                         name=lbl, line={"color": col} if col else None))
+            elif horizontal:
+                fig.add_trace(go.Bar(y=labels, x=vals, orientation="h",
+                                     name=lbl, marker_color=col))
+            else:
+                fig.add_trace(go.Bar(x=labels, y=vals, name=lbl, marker_color=col))
+        if ctype != "line":
+            fig.update_layout(barmode="stack" if chart.get("stacked") else "group")
+        axis = "xaxis_title" if horizontal else "yaxis_title"
+        fig.update_layout(title=title, **{axis: currency or ""})
+    elif ctype == "line":
+        fig = px.line(x=labels, y=values, title=title, labels={"x": "", "y": axlabel}, markers=True)
+        fig.update_traces(line_color=color)
     elif ctype == "horizontal-bar":
-        fig = px.bar(x=values, y=labels, orientation="h", title=title, labels={"x": ylabel, "y": ""})
+        fig = px.bar(x=values, y=labels, orientation="h", title=title, labels={"x": axlabel, "y": ""})
         fig.update_traces(marker_color=color)
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
     else:
-        fig = px.bar(x=labels, y=values, title=title, labels={"x": "", "y": ylabel})
+        fig = px.bar(x=labels, y=values, title=title, labels={"x": "", "y": axlabel})
         fig.update_traces(marker_color=color)
 
     fig.update_layout(margin={"t": 50, "b": 20}, height=400)
@@ -942,6 +965,19 @@ def _recon_report_html(d: dict) -> str:
     fx = ""
     if d.get("paid_currency") and d.get("paid_currency") != "MYR":
         fx = f"{d.get('paid_currency')} → MYR @ {d.get('exchange_rate')}"
+    # Forex: split into the invoice-vs-payment rate movement (the linked JV) and the settlement
+    # spread (the PE's own exchange line) when we have both; otherwise show a single total.
+    proj = " — projected, posts on submit" if d.get("forex_projected") else ""
+    if d.get("pe_forex") is not None and d.get("jv_forex") is not None:
+        forex_rows = [
+            ("Forex · invoice vs payment rate (MYR)", _fx_label(d.get("jv_forex"))),
+            ("Forex · settlement spread (MYR)", _fx_label(d.get("pe_forex"))),
+            (f"Forex total (MYR){proj}", _fx_label(d.get("forex"))),
+        ]
+    elif d.get("forex") is not None:
+        forex_rows = [(f"Forex gain/loss (MYR){proj}", _fx_label(d.get("forex")))]
+    else:
+        forex_rows = []
     rows = [
         ("Payment Entry", d.get("payment_entry")),
         ("Status", "Submitted" if d.get("submitted") else "Draft"),
@@ -954,7 +990,7 @@ def _recon_report_html(d: dict) -> str:
         ("Expected (MYR)", d.get("expected_myr")),
         ("Received in bank (MYR)", d.get("received_myr")),
         ("Bank charge (MYR)", f"MYR {d.get('bank_charge')}" if d.get("bank_charge") is not None else None),
-        ("Forex gain/loss (MYR)", _fx_label(d.get("forex")) if d.get("forex") is not None else None),
+        *forex_rows,
         ("Bank Reference", d.get("reference_no")),
         ("Match", f"confidence {d.get('confidence')} · {d.get('match_method')}"
                   if d.get("confidence") is not None else None),

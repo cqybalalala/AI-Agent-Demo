@@ -574,9 +574,13 @@ FOREX_LOSS_TOOL_DEFINITIONS = [
             "name": "get_payment_forex_loss",
             "description": (
                 "Read the realized foreign-exchange gain/loss that ERPNext booked for a "
-                "Payment Entry. Call this right after creating a Payment Entry for a "
-                "cross-currency payment to report the forex impact. Returns the amount in "
-                "company currency (MYR): positive = loss, negative = gain."
+                "Payment Entry, straight from the general ledger. Call this right after "
+                "creating a Payment Entry for a cross-currency payment to report the forex "
+                "impact. All amounts are in company currency (MYR); sign: positive = loss, "
+                "negative = gain. Returns a breakdown: pe_forex (the FX booked on the Payment "
+                "Entry itself), jv_forex (the FX booked on the linked, system-generated "
+                "'Exchange Gain Or Loss' Journal Entry — the cross-table portion), total_forex "
+                "(= pe_forex + jv_forex), and bank_charge (the SWIFT/TT fee, a separate line)."
             ),
             "parameters": {
                 "type": "object",
@@ -681,14 +685,18 @@ FOREX_SUMMARY_TOOL_DEFINITIONS = [
                 "receipts and supplier payments). Use this for questions like 'this week's forex "
                 "loss' or 'forex loss this month'. Returns a chart plus totals. "
                 "MYR; positive = loss, negative = gain. Do NOT compute forex loss from Payment "
-                "Entry difference_amount — that field is not the forex loss."
+                "Entry difference_amount — that field is not the forex loss. "
+                "Use group_by='payment' to get a PER-PAYMENT breakdown over the range: each row "
+                "has the Payment Entry, party, pe_forex, jv_forex, forex (total) and bank_charge. "
+                "This is the ONLY way to list forex/bank_charge per payment — they are NOT fields "
+                "on the Payment Entry doctype, so never request them via erpnext_list."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start_date": {"type": "string", "description": "YYYY-MM-DD (optional; default 30 days before end_date)"},
                     "end_date":   {"type": "string", "description": "YYYY-MM-DD (optional; default today)"},
-                    "group_by":   {"type": "string", "description": "day | week | month (default day)"},
+                    "group_by":   {"type": "string", "description": "day | week | month | party | payment (default day). 'payment' = per-Payment-Entry rows with forex + bank charge."},
                 },
             },
         },
@@ -1047,7 +1055,16 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 paid_amount_pe = foreign
                 fx_rate_pe     = api_rate          # ← real API rate fills source_exchange_rate
                 received_pe    = received
-                charge_info["forex"] = round(gap - charge, 2)  # realized forex (net)
+                # Realized forex, split into its two PROJECTED components (the PE is still a draft
+                # here — GL/JV don't exist yet — but both are deterministic from known inputs and
+                # will match the ledger once the user submits):
+                #   pe_forex = settlement spread: market valuation − net received − fee. Booked on
+                #              the Payment Entry's own exchange line.
+                #   jv_forex = invoice-vs-payment rate movement: foreign × (book rate − market
+                #              rate). Booked on the linked, system-generated Exchange Gain/Loss JV.
+                charge_info["pe_forex"] = round(gap - charge, 2)
+                charge_info["jv_forex"] = round(foreign * (inv_rate - api_rate), 2)
+                charge_info["forex"]    = round(charge_info["pe_forex"] + charge_info["jv_forex"], 2)
             else:
                 paid_amount_pe = bank_amt
                 fx_rate_pe     = 1.0
@@ -1086,8 +1103,11 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
             }
             if charge_info:
                 result["bank_charge"] = charge_info["charge"]
-                result["forex"] = charge_info["forex"]   # +ve = loss, -ve = gain
-                result["exchange_rate"] = api_rate       # real payment-day rate (from API)
+                result["forex"] = charge_info["forex"]            # total; +ve = loss, -ve = gain
+                result["pe_forex"] = charge_info["pe_forex"]      # settlement spread (PE line)
+                result["jv_forex"] = charge_info["jv_forex"]      # invoice-vs-payment rate (linked JV)
+                result["forex_projected"] = True                 # draft: posts on submit
+                result["exchange_rate"] = api_rate                # real payment-day rate (from API)
                 result["currency_unit"] = "MYR"
             return result
 
@@ -1096,29 +1116,41 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
             doc = erp.get("Payment Entry", pe_name)
             if not doc:
                 return {"success": False, "error": f"Payment Entry {pe_name} not found"}
-            # Realized FX = net of the exchange-account DEDUCTIONS on the PE, PLUS ERPNext's
-            # linked FX Journal Entry (the real payment rate makes base_paid < book, so ERPNext
-            # tops up the remainder in a separate JV against this PE). Bank charge is split out
-            # by account (the counter row sits on the exchange account unflagged).
-            deds = doc.get("deductions") or []
-            bank_charge = round(sum(float(x.get("amount") or 0)
-                                    for x in deds if x.get("account") == config.BANK_CHARGES_ACCOUNT), 2)
-            ded_fx = round(sum(float(x.get("amount") or 0) for x in deds) - bank_charge, 2)
-            jv = erp.list(
-                "GL Entry",
-                filters=[["against_voucher", "=", pe_name],
-                         ["account", "=", config.EXCHANGE_GL_ACCOUNT],
-                         ["voucher_type", "=", "Journal Entry"], ["is_cancelled", "=", 0]],
-                fields=["debit", "credit"], limit=50,
-            ).get("data", [])
-            jv_fx = round(sum(float(g.get("debit") or 0) - float(g.get("credit") or 0) for g in jv), 2)
-            net = round(ded_fx + jv_fx, 2)
+            # Read realized FX and the bank charge straight from the GENERAL LEDGER — the only
+            # reliable source. On submit ERPNext re-sizes the PE's exchange row and books the
+            # remainder in a separate, system-generated "Exchange Gain Or Loss" Journal Entry,
+            # so the submitted `deductions` no longer match what actually hit the GL. Split:
+            #   pe_forex   = the PE's own exchange-account lines (voucher_no = PE; the fx row
+            #                nets against its unflagged counter row).
+            #   jv_forex   = the linked cross-table JV (against_voucher = PE, voucher_type = JE).
+            #   bank_charge= the PE's bank-charge line.
+            # Sign throughout: debit - credit, so +ve = loss/expense, -ve = gain.
+            exch = config.EXCHANGE_GL_ACCOUNT
+            bank = config.BANK_CHARGES_ACCOUNT
+
+            def _gl_net(filters):
+                rows = erp.list("GL Entry", filters=filters,
+                                fields=["debit", "credit"], limit=200).get("data", [])
+                return round(sum(float(g.get("debit") or 0) - float(g.get("credit") or 0)
+                                 for g in rows), 2)
+
+            pe_forex = _gl_net([["voucher_no", "=", pe_name], ["account", "=", exch],
+                                ["is_cancelled", "=", 0]])
+            jv_forex = _gl_net([["against_voucher", "=", pe_name], ["account", "=", exch],
+                                ["voucher_type", "=", "Journal Entry"], ["is_cancelled", "=", 0]])
+            bank_charge = _gl_net([["voucher_no", "=", pe_name], ["account", "=", bank],
+                                   ["is_cancelled", "=", 0]])
+            total = round(pe_forex + jv_forex, 2)
             return {
                 "success": True,
                 "payment_entry": pe_name,
-                "forex_loss": net,                       # +ve = loss, -ve = gain
-                "result": "loss" if net > 0 else ("gain" if net < 0 else "none"),
-                "amount": abs(net),
+                "pe_forex":     pe_forex,      # FX on the Payment Entry itself (+loss / -gain)
+                "jv_forex":     jv_forex,      # FX on the linked cross-table JV (+loss / -gain)
+                "total_forex":  total,         # pe_forex + jv_forex
+                "forex_loss":   total,         # back-compat alias = total_forex
+                "bank_charge":  bank_charge,   # SWIFT/TT fee (+ve = expense)
+                "result": "loss" if total > 0 else ("gain" if total < 0 else "none"),
+                "amount": abs(total),
                 "currency": "MYR",
             }
 
@@ -1128,11 +1160,90 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
             start = args.get("start_date") or str(date.fromisoformat(end) - timedelta(days=30))
             group_by = (args.get("group_by") or "day").lower()
 
+            # group_by="payment": a per-Payment-Entry breakdown over the range (forex split into
+            # PE vs cross-table JV, plus the bank charge). NOTE: forex and bank_charge are NOT
+            # fields on the Payment Entry doctype — they only exist in the GL, which is why this
+            # is computed here rather than via erpnext_list.
+            if group_by == "payment":
+                exch = config.EXCHANGE_GL_ACCOUNT
+                bank = config.BANK_CHARGES_ACCOUNT
+                fx_rows = erp.list("GL Entry",
+                    filters=[["account", "=", exch], ["posting_date", ">=", start],
+                             ["posting_date", "<=", end], ["is_cancelled", "=", 0]],
+                    fields=["posting_date", "voucher_no", "voucher_type", "against_voucher",
+                            "debit", "credit"], limit=2000).get("data", [])
+                bc_rows = erp.list("GL Entry",
+                    filters=[["account", "=", bank], ["posting_date", ">=", start],
+                             ["posting_date", "<=", end], ["is_cancelled", "=", 0]],
+                    fields=["posting_date", "voucher_no", "debit", "credit"], limit=2000).get("data", [])
+
+                pes = {}
+                def _slot(pe, d):
+                    if pe and pe not in pes:
+                        pes[pe] = {"payment_entry": pe, "posting_date": d,
+                                   "pe_forex": 0.0, "jv_forex": 0.0, "bank_charge": 0.0}
+                    return pes.get(pe)
+
+                for r in fx_rows:
+                    net = float(r.get("debit") or 0) - float(r.get("credit") or 0)
+                    if r.get("voucher_type") == "Payment Entry":
+                        s = _slot(r.get("voucher_no"), r.get("posting_date"))
+                        if s: s["pe_forex"] += net
+                    else:
+                        # cross-table JV (and manual JEs) are keyed to their PE via against_voucher
+                        s = _slot(r.get("against_voucher"), r.get("posting_date"))
+                        if s: s["jv_forex"] += net
+                for r in bc_rows:
+                    s = _slot(r.get("voucher_no"), r.get("posting_date"))
+                    if s: s["bank_charge"] += float(r.get("debit") or 0) - float(r.get("credit") or 0)
+
+                # attach the counterparty in one batched lookup
+                names = list(pes.keys())
+                if names:
+                    try:
+                        parties = erp.list("Payment Entry", filters=[["name", "in", names]],
+                                           fields=["name", "party"], limit=len(names)).get("data", [])
+                        pmap = {p["name"]: p.get("party") for p in parties}
+                        for n, s in pes.items():
+                            s["party"] = pmap.get(n)
+                    except Exception:
+                        pass
+
+                out = []
+                for s in pes.values():
+                    s["pe_forex"]    = round(s["pe_forex"], 2)
+                    s["jv_forex"]    = round(s["jv_forex"], 2)
+                    s["forex"]       = round(s["pe_forex"] + s["jv_forex"], 2)
+                    s["bank_charge"] = round(s["bank_charge"], 2)
+                    out.append(s)
+                out.sort(key=lambda x: (x.get("posting_date") or "", x["payment_entry"]))
+                total_fx = round(sum(s["forex"] for s in out), 2)
+                total_bc = round(sum(s["bank_charge"] for s in out), 2)
+                chart = {
+                    "title": f"Forex gain/loss by payment ({start} to {end})",
+                    "labels": [s["payment_entry"] for s in out],
+                    "datasets": [
+                        {"label": "PE forex (MYR)", "values": [s["pe_forex"] for s in out], "color": "#ef4444"},
+                        {"label": "JV forex (cross-table, MYR)", "values": [s["jv_forex"] for s in out], "color": "#f59e0b"},
+                    ],
+                    "type": "bar", "stacked": True, "currency": "MYR",
+                }
+                return {
+                    "success": True, "_type": "chart", "chart": chart,
+                    "summary": {
+                        "start": start, "end": end, "group_by": "payment",
+                        "total_forex_loss": total_fx, "total_bank_charge": total_bc,
+                        "result": "loss" if total_fx > 0 else ("gain" if total_fx < 0 else "none"),
+                        "payments": len(out), "rows": out,
+                    },
+                }
+
             rows = erp.list(
                 doctype="GL Entry",
                 filters=[["account", "like", "%Exchange Gain%"],
-                         ["posting_date", ">=", start], ["posting_date", "<=", end]],
-                fields=["posting_date", "voucher_no", "party", "debit", "credit"],
+                         ["posting_date", ">=", start], ["posting_date", "<=", end],
+                         ["is_cancelled", "=", 0]],   # exclude cancelled vouchers' GL + reversals
+                fields=["posting_date", "voucher_no", "voucher_type", "party", "debit", "credit"],
                 limit=2000,
             ).get("data", [])
 
@@ -1150,20 +1261,36 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                     return r.get("party") or "—"
                 return d
 
-            agg, total = {}, 0.0
+            # Split each bucket into the FX booked on the Payment Entry itself vs. the FX booked
+            # on the linked, system-generated Journal Entries (the cross-table portion). Anything
+            # whose voucher is a Payment Entry → pe; everything else (the "Exchange Gain Or Loss"
+            # JV and any manual JE) → jv. Sign: debit - credit, +ve = loss, -ve = gain.
+            agg, pe_agg, jv_agg = {}, {}, {}
+            total = pe_total = jv_total = 0.0
             for r in rows:
                 net = float(r.get("debit") or 0) - float(r.get("credit") or 0)
                 b = _bucket(r)
                 agg[b] = round(agg.get(b, 0) + net, 2)
+                if r.get("voucher_type") == "Payment Entry":
+                    pe_agg[b] = round(pe_agg.get(b, 0) + net, 2)
+                    pe_total += net
+                else:
+                    jv_agg[b] = round(jv_agg.get(b, 0) + net, 2)
+                    jv_total += net
                 total += net
-            total = round(total, 2)
+            total, pe_total, jv_total = round(total, 2), round(pe_total, 2), round(jv_total, 2)
             labels = sorted(agg.keys())
             chart = {
                 "title": f"Forex gain/loss by {group_by} ({start} to {end})",
                 "labels": labels,
-                "datasets": [{"label": "Net forex (MYR, +loss / -gain)",
-                              "values": [agg[k] for k in labels], "color": "#ef4444"}],
+                "datasets": [
+                    {"label": "PE forex (MYR, +loss / -gain)",
+                     "values": [pe_agg.get(k, 0) for k in labels], "color": "#ef4444"},
+                    {"label": "JV forex (cross-table, MYR)",
+                     "values": [jv_agg.get(k, 0) for k in labels], "color": "#f59e0b"},
+                ],
                 "type": "bar",
+                "stacked": True,
                 "currency": "MYR",
             }
             return {
@@ -1171,8 +1298,13 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 "summary": {
                     "start": start, "end": end, "group_by": group_by,
                     "total_forex_loss": total,
+                    "pe_forex": pe_total,            # FX booked on Payment Entries themselves
+                    "jv_forex": jv_total,            # FX booked on linked / manual Journal Entries
                     "result": "loss" if total > 0 else ("gain" if total < 0 else "none"),
-                    "entries": len(rows), "by_bucket": agg,
+                    "entries": len(rows),
+                    "by_bucket": agg,
+                    "by_bucket_pe": pe_agg,
+                    "by_bucket_jv": jv_agg,
                 },
             }
 
@@ -1202,6 +1334,25 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 forex = ded_fx + sum(float(g.get("debit") or 0) - float(g.get("credit") or 0) for g in jv)
             forex = round(float(forex or 0), 2)
             bank_charge = round(float(bank_charge or 0), 2)
+            # Forex split: pe_forex = settlement spread (PE's own exchange line); jv_forex =
+            # invoice-vs-payment rate movement (the linked Exchange Gain/Loss JV). Prefer the
+            # projected figures passed from create_payment_entry (the PE is still a draft then —
+            # GL/JV don't exist yet); once submitted, read the real split from the GL.
+            pe_forex = args.get("pe_forex")
+            jv_forex = args.get("jv_forex")
+            if (pe_forex is None or jv_forex is None) and doc.get("docstatus") == 1:
+                exch = config.EXCHANGE_GL_ACCOUNT
+                def _net(filters):
+                    rs = erp.list("GL Entry", filters=filters,
+                                  fields=["debit", "credit"], limit=200).get("data", [])
+                    return round(sum(float(g.get("debit") or 0) - float(g.get("credit") or 0)
+                                     for g in rs), 2)
+                pe_forex = _net([["voucher_no", "=", pe_name], ["account", "=", exch],
+                                 ["is_cancelled", "=", 0]])
+                jv_forex = _net([["against_voucher", "=", pe_name], ["account", "=", exch],
+                                 ["voucher_type", "=", "Journal Entry"], ["is_cancelled", "=", 0]])
+            pe_forex = round(float(pe_forex), 2) if pe_forex is not None else None
+            jv_forex = round(float(jv_forex), 2) if jv_forex is not None else None
             losses = round(forex + bank_charge, 2)
             received_myr_val = float(doc.get("received_amount") or 0)
             book_myr = round(received_myr_val + forex + bank_charge, 2)   # value at invoice book rate
@@ -1221,6 +1372,9 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 "expected_myr":    book_myr,                 # value at the invoice book rate
                 "losses":          losses,
                 "forex":           forex,
+                "pe_forex":        pe_forex,                 # settlement spread (PE exchange line)
+                "jv_forex":        jv_forex,                 # invoice-vs-payment rate (linked JV)
+                "forex_projected": doc.get("docstatus") != 1,  # draft → figures post on submit
                 "bank_charge":     bank_charge,
                 "reference_no":    doc.get("reference_no"),
                 "mode_of_payment": doc.get("mode_of_payment"),
