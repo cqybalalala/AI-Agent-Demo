@@ -6,6 +6,7 @@ execute_tool()    → called when LLM returns a tool_call
 import difflib
 import json
 import os
+import re
 import subprocess
 import sys
 from erpnext_client import ERPAdapter
@@ -44,31 +45,6 @@ def run_calc(code: str) -> dict:
         return {"success": False, "error": result.stderr[-500:]}
     return {"success": True, "output": result.stdout.strip()}
 
-def run_python(code: str) -> dict:
-    """Run user code with ERP helpers pre-injected."""
-    import config
-    prelude = f"""
-import httpx, json
-from collections import defaultdict
-
-ERP_URL = {repr(config.ERPNEXT_URL)}
-HEADERS = {{"Authorization": "token {config.ERPNEXT_API_KEY}:{config.ERPNEXT_SECRET}"}}
-
-def erp_get(path, params=None):
-    encoded = path.replace(" ", "%20")
-    r = httpx.get(f"{{ERP_URL}}{{encoded}}", headers=HEADERS, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
-"""
-    full_code = prelude + "\n" + code
-    result = subprocess.run(
-        [sys.executable, "-c", full_code],
-        capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode != 0:
-        return {"success": False, "error": result.stderr[-1000:]}
-    return {"success": True, "output": result.stdout[-3000:]}
-
 # ── Docs search ───────────────────────────────────────────────────────────────
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
@@ -91,6 +67,33 @@ def search_docs(query: str) -> str:
     if not matches:
         return f"No documentation found for query: '{query}'. Available files: {os.listdir(DOCS_DIR)}"
     return "\n\n---\n\n".join(matches)
+
+
+def lookup_bank_charge(currency: str, gross_myr: float = None, sheet_url: str = None) -> dict:
+    """
+    Resolve the bank charge rate for `currency` from the BankCharges sheet tab.
+    Lookup key is the payment currency; falls back to the '*' row. The fee is
+    `gross_myr * percent/100 + flat` (percent is in percent, e.g. 0.05 = 0.05%).
+
+    Returns {currency, matched, percent, flat, charge?}. Raises ValueError if the
+    sheet/tab can't be read or has no usable row.
+    """
+    import config
+    from bank_statement_parser import fetch_bank_charges
+    cur = (currency or "").upper()
+    table = fetch_bank_charges(sheet_url or config.BANK_STATEMENT_SHEET_URL)
+    row = table.get(cur) or table.get("*")
+    if row is None:
+        raise ValueError(f"No bank charge rate for '{cur}' and no '*' default in BankCharges tab.")
+    out = {
+        "currency": cur,
+        "matched":  cur if cur in table else "*",
+        "percent":  row["percent"],
+        "flat":     row["flat"],
+    }
+    if gross_myr is not None:
+        out["charge"] = round(float(gross_myr) * row["percent"] / 100 + row["flat"], 2)
+    return out
 
 # ── Tool schemas (what the LLM sees) ─────────────────────────────────────────
 
@@ -405,6 +408,36 @@ WRITE_TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "erpnext_comment",
+            "description": (
+                "Add an audit comment to a document's timeline (NOT a field change, NOT a "
+                "financial write). Use this to record a documented override/correction on a "
+                "Payment Entry — e.g. when a payment proof cited the wrong invoice and the user "
+                "verified the correct one with the counterparty. Write a clear, self-contained "
+                "audit note in plain English."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doctype": {"type": "string", "description": "Usually 'Payment Entry'."},
+                    "name": {"type": "string", "description": "Document name, e.g. 'ACC-PAY-2026-00969'."},
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "The audit note. For a corrected-reference override, include: the "
+                            "original proof reference, the corrected invoice, how it was verified "
+                            "(e.g. 'confirmed with customer by phone'), the original reconcile "
+                            "status/confidence, and the final booked amount."
+                        ),
+                    },
+                },
+                "required": ["name", "content"],
+            },
+        },
+    },
 ]
 
 # ── Chart tool definitions ────────────────────────────────────────────────────
@@ -551,6 +584,32 @@ FOREX_LOSS_TOOL_DEFINITIONS = [
                     "payment_entry": {"type": "string", "description": "Payment Entry name e.g. ACC-PAY-2026-00969"},
                 },
                 "required": ["payment_entry"],
+            },
+        },
+    },
+]
+
+# ── Bank charge rate lookup ──────────────────────────────────────────────────
+
+BANK_CHARGE_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bank_charge_rate",
+            "description": (
+                "Look up the bank charge (SWIFT/TT fee) for a foreign-currency payment from "
+                "the BankCharges tab of the bank statement Google Sheet. The fee is a separate "
+                "line from the forex gain/loss. Returns the percent and flat rate, and — if you "
+                "pass the gross MYR amount — the computed charge. Call this during cross-border "
+                "reconciliation so you can report the bank charge and the forex impact separately."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "currency":  {"type": "string", "description": "Payment (invoice) currency e.g. USD, SGD"},
+                    "gross_myr": {"type": "number", "description": "Optional: gross amount in MYR to compute the charge on"},
+                },
+                "required": ["currency"],
             },
         },
     },
@@ -752,7 +811,7 @@ FOREX_TOOL_DEFINITIONS = [
 
 # ── All tools by name (for domain filtering) ────────────────────────────────
 
-ALL_TOOLS = {t["function"]["name"]: t for t in TOOL_DEFINITIONS + WRITE_TOOL_DEFINITIONS + CHART_TOOL_DEFINITIONS + FOREX_TOOL_DEFINITIONS + RECONCILE_TOOL_DEFINITIONS + BANK_FETCH_TOOL_DEFINITIONS + THREE_WAY_TOOL_DEFINITIONS + CREATE_PE_TOOL_DEFINITIONS + FOREX_LOSS_TOOL_DEFINITIONS + ARTIFACT_TOOL_DEFINITIONS + FOREX_SUMMARY_TOOL_DEFINITIONS}
+ALL_TOOLS = {t["function"]["name"]: t for t in TOOL_DEFINITIONS + WRITE_TOOL_DEFINITIONS + CHART_TOOL_DEFINITIONS + FOREX_TOOL_DEFINITIONS + RECONCILE_TOOL_DEFINITIONS + BANK_FETCH_TOOL_DEFINITIONS + THREE_WAY_TOOL_DEFINITIONS + CREATE_PE_TOOL_DEFINITIONS + FOREX_LOSS_TOOL_DEFINITIONS + BANK_CHARGE_TOOL_DEFINITIONS + ARTIFACT_TOOL_DEFINITIONS + FOREX_SUMMARY_TOOL_DEFINITIONS}
 
 
 def get_tools_for_domain(read_tool_names: list, write_tool_names: list) -> list:
@@ -892,6 +951,14 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 },
             }
 
+        elif name == "get_bank_charge_rate":
+            try:
+                out = lookup_bank_charge(
+                    args["currency"], args.get("gross_myr"), args.get("sheet_url"))
+            except Exception as e:
+                return {"success": False, "error": f"Bank charge lookup failed: {e}"}
+            return {"success": True, **out, "currency_unit": "MYR"}
+
         elif name == "create_payment_entry":
             from forex import get_rate
             inv_name   = args["invoice_name"]
@@ -901,6 +968,13 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
             ref_no     = args["reference_no"]
             local_cur  = "MYR"
 
+            # Only Receive (customer) is implemented with the bank-charge recipe.
+            # Pay (supplier) direction mirrors the signs/accounts and is NOT yet verified.
+            if inv_type != "Sales Invoice":
+                return {"success": False,
+                        "error": "create_payment_entry currently supports Sales Invoice "
+                                 "(Receive) only. Supplier payments are not yet implemented."}
+
             # 1. Fetch invoice
             doc = erp.get(inv_type, inv_name)
             if not doc:
@@ -908,58 +982,95 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
 
             inv_currency    = doc.get("currency", local_cur)
             inv_outstanding = float(doc.get("outstanding_amount") or doc.get("grand_total") or 0)
-            party_field     = "customer" if inv_type == "Sales Invoice" else "supplier"
-            party           = doc.get(party_field, "")
-            paid_from       = doc.get("debit_to") or doc.get("credit_to", "")
+            inv_rate        = float(doc.get("conversion_rate") or 1.0)   # invoice BOOK rate
+            party           = doc.get("customer", "")
+            paid_from       = doc.get("debit_to", "")                    # Debtor GL account
 
-            # 2. Lookup company bank account
-            paid_to = ""
-            bank_account_doc = ""
-            try:
-                bank_accts = erp.list(
-                    "Bank Account",
-                    filters=[["company", "=", config.ERPNEXT_COMPANY], ["is_default", "=", 1]],
-                    fields=["name", "account"], limit=1,
-                ).get("data", [])
-                if not bank_accts:
-                    bank_accts = erp.list(
-                        "Bank Account",
-                        filters=[["company", "=", config.ERPNEXT_COMPANY]],
-                        fields=["name", "account"], limit=1,
-                    ).get("data", [])
-                if bank_accts:
-                    paid_to = bank_accts[0].get("account", "")
-                    bank_account_doc = bank_accts[0].get("name", "")
-            except Exception:
-                pass
+            # 2. Bank GL account (no Bank Account doctype on this instance — use GL directly)
+            paid_to = config.BANK_GL_ACCOUNT
 
-            # 3. Amounts and exchange rate
+            # 3. Amounts, exchange rate, bank charge — booked on the PE's "Deductions or Loss"
+            #    side (no separate Journal Entry). source_exchange_rate = the REAL payment-day
+            #    rate fetched from the forex API (forex.get_rate) — NOT a self-filled value.
+            #    received_amount = the actual NET MYR received. The gap (book − net) is split
+            #    into a distinct bank-charge line and a forex line via a 3-row deductions
+            #    structure (ERPNext's "Set Exchange Gain/Loss" pattern):
+            #      ① Exchange Gain/Loss = full gap, flagged is_exchange_gain_loss (ERPNext
+            #        re-sizes this and tops up any remainder with its own linked FX JV);
+            #      ② Bank Charges       = the SWIFT/TT fee (from the BankCharge sheet);
+            #      ③ Exchange Gain/Loss = -fee, an UNflagged counter that cancels ② in the
+            #        over-allocation calc — so the invoice still clears exactly at book.
+            #    Net: Bank Charges is its own GL line; the exchange account (PE rows + the
+            #    linked JV) nets to the true realized forex (gap − fee). Domestic MYR: simple.
+            from forex import get_rate
+            deductions  = []
+            charge_info = None
             if inv_currency != local_cur:
-                paid_amount_pe = inv_outstanding
-                fx = get_rate(inv_currency, local_cur, pay_date)
-                fx_rate_pe = fx.get("rate", 1.0) if fx.get("success") else 1.0
+                foreign  = inv_outstanding
+                received = round(bank_amt, 2)                 # actual net MYR received
+                # Value the invoice at the PAYMENT-DAY MARKET rate (forex API), NOT the invoice's
+                # own booked conversion_rate. The market-rate value is the agreed basis for the
+                # "expected MYR" and the realized forex figure — so SGD 424 @ 3.0941 = MYR 1311.90,
+                # NOT @ 3.0 = 1272. Falls back to the invoice rate only if the API call fails.
+                fx       = get_rate(inv_currency, local_cur, pay_date)
+                api_rate = round(float(fx.get("rate")), 6) if fx.get("success") and fx.get("rate") else inv_rate
+                book_myr = round(foreign * api_rate, 2)       # value at payment-day MARKET rate
+                gap      = round(book_myr - received, 2)      # forex + bank charge combined
+
+                try:
+                    charge_info = lookup_bank_charge(inv_currency, received)
+                except Exception as e:
+                    return {"success": False,
+                            "error": f"Bank charge lookup failed for {inv_currency}: {e}. "
+                                     "Ensure the BankCharge tab exists in the bank sheet."}
+                charge = charge_info["charge"]
+
+                if gap:
+                    deductions.append({
+                        "account":     config.EXCHANGE_GL_ACCOUNT,
+                        "cost_center": config.COST_CENTER,
+                        "amount":      gap,
+                        "is_exchange_gain_loss": 1,
+                    })
+                if charge:
+                    deductions.append({
+                        "account":     config.BANK_CHARGES_ACCOUNT,
+                        "cost_center": config.COST_CENTER,
+                        "amount":      charge,                 # the fee → its own GL line
+                    })
+                    deductions.append({
+                        "account":     config.EXCHANGE_GL_ACCOUNT,
+                        "cost_center": config.COST_CENTER,
+                        "amount":      -charge,                # counter — cancels the fee in
+                    })                                         # the over-allocation calc
+
+                paid_amount_pe = foreign
+                fx_rate_pe     = api_rate          # ← real API rate fills source_exchange_rate
+                received_pe    = received
+                charge_info["forex"] = round(gap - charge, 2)  # realized forex (net)
             else:
                 paid_amount_pe = bank_amt
-                fx_rate_pe = 1.0
+                fx_rate_pe     = 1.0
+                received_pe    = bank_amt
 
-            # 4. Build and create Payment Entry
+            # 4. Build and create the Payment Entry (charge + forex live in deductions).
             pe_data = {
-                "payment_type":              "Receive" if party_field == "customer" else "Pay",
+                "payment_type":              "Receive",
                 "posting_date":              pay_date,
                 "company":                   config.ERPNEXT_COMPANY,
                 "mode_of_payment":           "Bank Transfer",
-                "party_type":                "Customer" if party_field == "customer" else "Supplier",
+                "party_type":                "Customer",
                 "party":                     party,
                 "paid_from":                 paid_from,
                 "paid_from_account_currency": inv_currency,
-                "bank_account":              bank_account_doc,
                 "paid_to":                   paid_to,
                 "paid_to_account_currency":  local_cur,
                 "paid_amount":               paid_amount_pe,
                 "source_exchange_rate":      fx_rate_pe,
-                "received_amount":           bank_amt,
+                "received_amount":           received_pe,
                 "reference_no":              ref_no,
                 "reference_date":            pay_date,
+                "deductions":                deductions,
                 "references": [{
                     "reference_doctype": inv_type,
                     "reference_name":    inv_name,
@@ -967,22 +1078,41 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 }],
             }
             created = erp.create("Payment Entry", pe_data)
-            return {
+            result = {
                 "success": True,
                 "message": f"Payment Entry created: {created.get('name')}",
-                "data": {"name": created.get("name"), "docstatus": created.get("docstatus", 0)},
+                "data": {"name": created.get("name"), "doctype": "Payment Entry",
+                         "docstatus": created.get("docstatus", 0)},
             }
+            if charge_info:
+                result["bank_charge"] = charge_info["charge"]
+                result["forex"] = charge_info["forex"]   # +ve = loss, -ve = gain
+                result["exchange_rate"] = api_rate       # real payment-day rate (from API)
+                result["currency_unit"] = "MYR"
+            return result
 
         elif name == "get_payment_forex_loss":
             pe_name = args["payment_entry"]
             doc = erp.get("Payment Entry", pe_name)
             if not doc:
                 return {"success": False, "error": f"Payment Entry {pe_name} not found"}
-            # Realized FX gain/loss lives in the deductions child table,
-            # flagged is_exchange_gain_loss. Present in draft and submitted PEs.
-            net = round(sum(float(x.get("amount") or 0)
-                            for x in (doc.get("deductions") or [])
-                            if x.get("is_exchange_gain_loss")), 2)
+            # Realized FX = net of the exchange-account DEDUCTIONS on the PE, PLUS ERPNext's
+            # linked FX Journal Entry (the real payment rate makes base_paid < book, so ERPNext
+            # tops up the remainder in a separate JV against this PE). Bank charge is split out
+            # by account (the counter row sits on the exchange account unflagged).
+            deds = doc.get("deductions") or []
+            bank_charge = round(sum(float(x.get("amount") or 0)
+                                    for x in deds if x.get("account") == config.BANK_CHARGES_ACCOUNT), 2)
+            ded_fx = round(sum(float(x.get("amount") or 0) for x in deds) - bank_charge, 2)
+            jv = erp.list(
+                "GL Entry",
+                filters=[["against_voucher", "=", pe_name],
+                         ["account", "=", config.EXCHANGE_GL_ACCOUNT],
+                         ["voucher_type", "=", "Journal Entry"], ["is_cancelled", "=", 0]],
+                fields=["debit", "credit"], limit=50,
+            ).get("data", [])
+            jv_fx = round(sum(float(g.get("debit") or 0) - float(g.get("credit") or 0) for g in jv), 2)
+            net = round(ded_fx + jv_fx, 2)
             return {
                 "success": True,
                 "payment_entry": pe_name,
@@ -1052,9 +1182,29 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
             if not doc:
                 return {"success": False, "error": f"Payment Entry {pe_name} not found"}
             ref = (doc.get("references") or [{}])[0]
-            losses = round(sum(float(x.get("amount") or 0)
-                               for x in (doc.get("deductions") or [])
-                               if x.get("is_exchange_gain_loss")), 2)
+            deds = doc.get("deductions") or []
+            # Bank charge and forex are DISTINCT GL lines in the PE's deductions. Split by
+            # ACCOUNT: the bank charge sits on BANK_CHARGES_ACCOUNT; everything else (the forex
+            # row plus its UNflagged counter) nets to the true realized forex. Prefer figures
+            # passed from create_payment_entry, else compute from the deductions.
+            bank_charge = args.get("bank_charge")
+            forex = args.get("forex")
+            if bank_charge is None:
+                bank_charge = round(sum(float(x.get("amount") or 0)
+                                        for x in deds if x.get("account") == config.BANK_CHARGES_ACCOUNT), 2)
+            if forex is None:
+                ded_fx = sum(float(x.get("amount") or 0) for x in deds) - bank_charge
+                jv = erp.list("GL Entry",
+                    filters=[["against_voucher", "=", pe_name],
+                             ["account", "=", config.EXCHANGE_GL_ACCOUNT],
+                             ["voucher_type", "=", "Journal Entry"], ["is_cancelled", "=", 0]],
+                    fields=["debit", "credit"], limit=50).get("data", [])
+                forex = ded_fx + sum(float(g.get("debit") or 0) - float(g.get("credit") or 0) for g in jv)
+            forex = round(float(forex or 0), 2)
+            bank_charge = round(float(bank_charge or 0), 2)
+            losses = round(forex + bank_charge, 2)
+            received_myr_val = float(doc.get("received_amount") or 0)
+            book_myr = round(received_myr_val + forex + bank_charge, 2)   # value at invoice book rate
             data = {
                 "payment_entry":   doc.get("name"),
                 "posting_date":    doc.get("posting_date"),
@@ -1066,10 +1216,12 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 "allocated":       ref.get("allocated_amount"),
                 "paid_amount":     doc.get("paid_amount"),
                 "paid_currency":   doc.get("paid_from_account_currency") or doc.get("paid_to_account_currency"),
-                "received_myr":    doc.get("received_amount") if doc.get("payment_type") == "Receive" else doc.get("base_paid_amount"),
+                "received_myr":    received_myr_val,         # actual net received in the bank
                 "exchange_rate":   doc.get("source_exchange_rate"),
-                "expected_myr":    doc.get("base_paid_amount"),
+                "expected_myr":    book_myr,                 # value at the invoice book rate
                 "losses":          losses,
+                "forex":           forex,
+                "bank_charge":     bank_charge,
                 "reference_no":    doc.get("reference_no"),
                 "mode_of_payment": doc.get("mode_of_payment"),
                 "confidence":      args.get("confidence"),
@@ -1141,6 +1293,11 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
 
             invoice_name = args.get("invoice_name")
             invoice_type = args.get("invoice_type", "Sales Invoice")
+            # Explicitly naming an invoice is a deliberate HUMAN override (e.g. the proof
+            # cited the wrong invoice and the user verified the correct one). In that case
+            # the proof's cited reference is no longer authoritative, so the ref-mismatch
+            # guard below must NOT fire against it.
+            explicit_override = bool(invoice_name)
 
             def _to_local(amt, cur):
                 amt = float(amt or 0)
@@ -1223,6 +1380,45 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                             ("_doctype", "_party_field", "_ref_field", "_local_amount")}
                     inv_found = {**full, **meta}
 
+            # ── 3b. Reference-vs-match contradiction guard ───────────────────
+            # If the proof cites a specific invoice number but we matched a
+            # DIFFERENT invoice (by name+amount/amount fallback), the payment is
+            # being mis-allocated. Detect it and force human review.
+            ref_invoice = None
+            _m = re.search(r"[A-Z]{2,5}-[A-Z]{2,5}-\d{4}-\d{5}", (reference or "").upper())
+            if _m:
+                ref_invoice = _m.group(0)
+            ref_mismatch = bool(
+                ref_invoice and inv_found is not None
+                and inv_method != "reference"
+                and str(inv_found.get("name", "")).upper() != ref_invoice
+                and not explicit_override   # human explicitly chose this invoice → not a mis-allocation
+            )
+            result["ref_invoice"]  = ref_invoice
+            result["ref_mismatch"] = ref_mismatch
+            # On an explicit override where the proof cited a different invoice, record it as
+            # informational context (NOT a blocking "review" note) for the audit trail.
+            if explicit_override and ref_invoice and inv_found is not None \
+                    and str(inv_found.get("name", "")).upper() != ref_invoice:
+                result["override_note"] = (
+                    f"Proof cited {ref_invoice}; posting against operator-specified "
+                    f"{inv_found['name']}.")
+            if ref_mismatch:
+                note = (f"Proof references {ref_invoice} but was matched to "
+                        f"{inv_found['name']} by {inv_method}")
+                for _t in ("Sales Invoice", "Purchase Invoice"):
+                    try:
+                        cited = erp.get(_t, ref_invoice)
+                    except Exception:
+                        cited = None
+                    if cited:
+                        out = float(cited.get("outstanding_amount") or 0)
+                        note += (f" — {ref_invoice} is already fully paid" if out == 0
+                                 else f" — {ref_invoice} is still outstanding "
+                                      f"({cited.get('currency','')} {out})")
+                        break
+                result["note"] = note + ". Review before posting."
+
             # ── 4. Match bank: reference → amount ────────────────────────────
             bank_found, bank_method = None, None
             for t in txns:
@@ -1280,6 +1476,8 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                     confidence = round(party_sim * 40 + (1 - min(inv_diff, INV_TOL) / INV_TOL) * 60)
                 else:  # amount-only fallback
                     confidence = min(50, round((1 - min(inv_diff, INV_TOL) / INV_TOL) * 50))
+                if result.get("ref_mismatch"):
+                    confidence = min(confidence, 40)   # cited a different invoice
                 result["confidence"] = confidence
 
                 party_ok = party_sim >= NAME_TOL
@@ -1287,9 +1485,11 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 inv_ok   = inv_diff <= RECON_TOL
 
                 # GUARD: a matching bank amount is NOT enough on its own — the
-                # invoice party and the invoice amount must also agree, else the
-                # case is flagged for human review instead of auto-reconciled.
-                if party_ok and bank_ok and inv_ok and inv_method != "amount":
+                # invoice party and the invoice amount must also agree, AND the
+                # proof must not cite a different invoice number, else the case
+                # is flagged for human review instead of auto-reconciled.
+                if party_ok and bank_ok and inv_ok and inv_method != "amount" \
+                        and not result.get("ref_mismatch"):
                     result["status"] = "RECONCILED"
                     result["needs_review"] = False
                     result["ready_for_payment_entry"] = True
@@ -1541,6 +1741,17 @@ def execute_tool(name: str, args: dict, erp: ERPAdapter) -> dict:
                 "success": True,
                 "message": f"Updated {args['doctype']}: {args['name']}",
                 "data": {"name": doc.get("name"), "docstatus": doc.get("docstatus", 0)},
+            }
+
+        elif name == "erpnext_comment":
+            doctype = args.get("doctype", "Payment Entry")
+            doc_name = args["name"]
+            content = args["content"]
+            created = erp.add_comment(doctype, doc_name, content)
+            return {
+                "success": True,
+                "message": f"Comment added to {doctype} {doc_name}",
+                "data": {"name": created.get("name"), "reference": doc_name},
             }
 
         # ── Chart tools ─────────────────────────────────────────────────

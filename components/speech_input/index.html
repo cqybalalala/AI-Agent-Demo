@@ -4,65 +4,54 @@
 <meta charset="UTF-8" />
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: sans-serif;
+  html, body {
     background: transparent;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 4px 2px;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
   }
+  body { display: flex; align-items: center; justify-content: center; }
+
   #btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: #8b95a5;
+    cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border: 1px solid #555;
-    border-radius: 6px;
-    background: #1e1e1e;
-    color: #ccc;
-    cursor: pointer;
-    font-size: 13px;
-    transition: background 0.15s, border-color 0.15s;
-    white-space: nowrap;
-    user-select: none;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    -webkit-tap-highlight-color: transparent;
   }
-  #btn:hover { background: #2a2a2a; border-color: #888; }
+  #btn:hover { background: rgba(120,130,145,0.15); color: #5b6472; }
+  #btn svg { width: 18px; height: 18px; display: block; }
+
   #btn.listening {
-    background: #3b1010;
-    border-color: #e05252;
-    color: #f88;
+    background: rgba(224,82,82,0.15);
+    color: #e05252;
     animation: pulse 1s infinite;
   }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
-    50%       { opacity: 0.6; }
+    50%       { opacity: 0.55; }
   }
-  #dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: #666;
-    flex-shrink: 0;
-  }
-  #btn.listening #dot { background: #e05252; }
-  #status {
-    font-size: 11px;
-    color: #888;
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  #status.interim { color: #aaa; font-style: italic; }
+  #btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
 
-<button id="btn">
-  <span id="dot"></span>
-  <span id="label">Start Speaking</span>
+<button id="btn" title="Speak">
+  <!-- microphone icon -->
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+    <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
+    <line x1="12" y1="18" x2="12" y2="22"/>
+  </svg>
 </button>
-<span id="status"></span>
 
 <script>
   // ── Streamlit component handshake ─────────────────────────────────────────
@@ -76,27 +65,37 @@
     sendMessage("streamlit:setComponentValue", { value, dataType: "json" });
   }
   sendMessage("streamlit:componentReady", { apiVersion: 1 });
-  sendMessage("streamlit:setFrameHeight", { height: 44 });
+  sendMessage("streamlit:setFrameHeight", { height: 38 });
 
   // ── Elements ──────────────────────────────────────────────────────────────
-  const btn    = document.getElementById("btn");
-  const label  = document.getElementById("label");
-  const status = document.getElementById("status");
+  const btn = document.getElementById("btn");
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    label.textContent = "Not supported";
     btn.disabled = true;
-    status.textContent = "Use Chrome or Edge";
+    btn.title = "Voice input needs Chrome or Edge";
   } else {
 
-    // ── Dual-buffer state (ARIA pattern) ──────────────────────────────────
-    let recognition       = null;
-    let isRecording       = false;
-    let currentTranscript = "";   // accumulated finals
-    let latestInterim     = "";   // latest interim (replaced each frame)
-    let silenceTimer      = null;
-    const SILENCE_MS      = 1800; // auto-stop after 1.8 s silence
+    // ── Transcript state ──────────────────────────────────────────────────
+    // committed   = finalized text from sessions that have already ended
+    // sessionFinal= finalized text within the CURRENT recognition session
+    // interim     = not-yet-finalized text in the current session
+    // Chrome restarts the recognition session on every pause, so we persist
+    // `committed` across restarts and never rely on result-index deltas.
+    let recognition  = null;
+    let isRecording  = false;
+    let committed    = "";
+    let sessionFinal = "";
+    let interim      = "";
+
+    function join(a, b) {
+      b = (b || "").trim();
+      if (!b) return a;
+      return a ? a + (a.endsWith(" ") ? "" : " ") + b : b;
+    }
+    function fullText() {
+      return join(join(committed, sessionFinal), interim).trim();
+    }
 
     function initRecognition() {
       recognition = new SR();
@@ -106,34 +105,23 @@
       recognition.lang            = "en-US";
 
       recognition.onresult = e => {
-        for (let i = e.resultIndex; i < e.results.length; i++) {
+        // rebuild the current session's text from scratch each event
+        sessionFinal = "";
+        interim      = "";
+        for (let i = 0; i < e.results.length; i++) {
           const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) {
-            currentTranscript += (currentTranscript && !currentTranscript.endsWith(" ") ? " " : "") + t.trim();
-            latestInterim = "";
-          } else {
-            latestInterim = t;
-          }
+          if (e.results[i].isFinal) sessionFinal = join(sessionFinal, t);
+          else                      interim      = join(interim, t);
         }
-
-        const display = latestInterim
-          ? currentTranscript + (currentTranscript ? " " : "") + latestInterim
-          : currentTranscript;
-
-        status.textContent = display || "Listening…";
-        status.className   = latestInterim ? "interim" : "";
-
-        // Restart silence countdown on every speech event
-        clearTimeout(silenceTimer);
-        silenceTimer = setTimeout(() => {
-          if (isRecording && (currentTranscript.trim() || latestInterim.trim())) {
-            stopAndSend();
-          }
-        }, SILENCE_MS);
       };
 
-      // Chrome auto-stops after silence — restart if still recording
+      // Chrome ends the session on its own after a pause. Commit this session's
+      // finalized text, then restart so recording stays continuous until the
+      // user clicks the mic again to stop.
       recognition.onend = () => {
+        committed    = join(committed, sessionFinal);
+        sessionFinal = "";
+        interim      = "";
         if (isRecording) {
           try { recognition.start(); } catch {}
         }
@@ -142,41 +130,32 @@
       recognition.onerror = e => {
         if (e.error === "no-speech") return;
         if (e.error === "not-allowed") {
-          status.textContent = "Mic access denied";
-          status.className = "";
+          btn.title = "Mic access denied";
           stopUI();
+          isRecording = false;
         }
       };
     }
 
     function startUI() {
       btn.classList.add("listening");
-      label.textContent  = "Stop";
-      status.textContent = "Listening…";
-      status.className   = "interim";
+      btn.title = "Listening… click to stop";
     }
 
     function stopUI() {
       btn.classList.remove("listening");
-      label.textContent = "Start Speaking";
-      status.className  = "";
+      btn.title = "Speak";
     }
 
     function stopAndSend() {
       if (!isRecording) return;
       isRecording = false;
-      clearTimeout(silenceTimer);
-      // Merge any remaining interim into finals
-      const final = (currentTranscript + (latestInterim ? " " + latestInterim : "")).trim();
+      // Capture everything (committed + current session final + interim) BEFORE
+      // stopping, so the last words spoken are never dropped.
+      const final = fullText();
       try { recognition.stop(); } catch {}
       stopUI();
-      if (final) {
-        status.textContent = final;
-        sendValue(final);
-      } else {
-        status.textContent = "";
-        sendValue(null);
-      }
+      sendValue(final || null);
     }
 
     btn.addEventListener("click", () => {
@@ -184,9 +163,10 @@
         stopAndSend();
       } else {
         if (!recognition) initRecognition();
-        currentTranscript = "";
-        latestInterim     = "";
-        isRecording       = true;
+        committed    = "";
+        sessionFinal = "";
+        interim      = "";
+        isRecording  = true;
         sendValue(null);  // clear previous value on Streamlit side
         startUI();
         try { recognition.start(); } catch(e) { console.warn(e); }

@@ -47,6 +47,14 @@ ERPNEXT_SECRET  = "9b34ec3b96f507e"
 # ── ERP metadata ─────────────────────────────────────────────────────────────
 ERPNEXT_COMPANY    = "Penang Components Sdn Bhd"
 
+# GL accounts used when posting a Payment Entry. This instance has NO `Bank Account`
+# doctype records and NO `Currency Exchange` records, so the bank line and the cost
+# center are addressed directly by their GL account names (verified on the live ERP).
+BANK_GL_ACCOUNT      = "1210 - Maybank - PCSB"          # Bank-type GL account (paid_to)
+BANK_CHARGES_ACCOUNT = "5221 - Bank Charges - PCSB"     # Expense — the SWIFT/TT fee line
+EXCHANGE_GL_ACCOUNT  = "5219 - Exchange Gain/Loss - PCSB"  # realized forex gain/loss
+COST_CENTER          = "Main - PCSB"
+
 # ── Bank Statement Google Sheet ───────────────────────────────────────────────
 # Paste your Google Sheet URL here (must be set to "Anyone with link can view")
 BANK_STATEMENT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1gTz-uJPGNDNkhP_rtZMWUfVO_duphO3lqnAInOgG8ys/edit?usp=sharing"
@@ -56,3 +64,24 @@ AGENT_READ_ONLY  = True   # set False to enable write tools (later)
 AGENT_TEMPERATURE = 0.3   # low = less hallucination, high = more creative
 MAX_TOOL_LOOPS   = 10     # prevent infinite tool call loops
 RESULT_LIMIT     = 30     # max rows returned per list call
+
+# ── Guardrail (intent / safety pre-check before the agent loop) ───────────────
+# A small model classifies each user request as allow/block. Primary runs on the
+# LAN Ollama (cheap + private); if it's unreachable we fall back to Chutes.
+GUARDRAIL_ENABLED  = True
+GUARDRAIL_PRIMARY = {
+    "base_url":   OLLAMA_BASE_URL.rstrip("/") + "/v1",
+    "api_key":    "ollama",
+    # 8B classifies all categories reliably (4B under-blocks out-of-scope).
+    # enable_thinking=False: it's a reasoning model — skip the hidden think block.
+    "model":      "qwen3:8b-q4_K_M",
+    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    "timeout":    15,
+}
+GUARDRAIL_FALLBACK = {
+    "base_url": "https://llm.chutes.ai/v1",
+    "api_key":  CHUTES_API_KEY,
+    "model":    "Qwen/Qwen3.6-27B-TEE",
+    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    "timeout":  30,
+}

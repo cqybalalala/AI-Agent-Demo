@@ -36,7 +36,7 @@ erpnext_client.py: ERPNextAdapter  (httpx calls to Frappe REST API)
 - **`config.py`** — All runtime settings: Ollama URL/model, ERPNext URL/credentials, `AGENT_READ_ONLY`, `MAX_TOOL_LOOPS`, `RESULT_LIMIT`.
 - **`router.py`** — `route()` tries `keyword_route()` first; falls back to `llm_route()` only when keywords don't match.
 - **`domains.py`** — Each domain defines its name, keywords, read/write tool lists, and a system prompt builder. Adding a domain means adding an entry here.
-- **`tools.py`** — Tool JSON schemas sent to the LLM, plus `execute_tool()` dispatcher. Tools: `erpnext_list`, `erpnext_get`, `erpnext_report`, `erpnext_linked`, `erpnext_items`, `erpnext_search`, `erpnext_fields`, `erpnext_docs`, `execute_python`, `erpnext_create`.
+- **`tools.py`** — Tool JSON schemas sent to the LLM, plus `execute_tool()` dispatcher. Tools: `erpnext_list`, `erpnext_get`, `erpnext_report`, `erpnext_linked`, `erpnext_items`, `erpnext_search`, `erpnext_fields`, `erpnext_docs`, `erpnext_create`.
 - **`erpnext_client.py`** — `ERPAdapter` abstract base; `ERPNextAdapter` concrete implementation. `list()` supports server-side aggregation (`group_by` + `sum_field`). `linked()` tries multiple field naming patterns to work around ERPNext schema variation. `get_erp_adapter()` is the factory.
 - **`agent.py`** — `LLMAdapter` wraps Ollama via OpenAI-compatible client. `run_turn()` runs the tool loop and handles Qwen3 thinking-mode stripping. Write operations trigger a `Proceed? (y/n)` confirmation gate before calling `erpnext_create`.
 

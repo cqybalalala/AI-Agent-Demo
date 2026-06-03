@@ -12,6 +12,7 @@ from erpnext_client import get_erp_adapter
 from tools import TOOL_DEFINITIONS, WRITE_TOOL_DEFINITIONS, get_tools_for_domain, execute_tool
 from domains import get_domain_config, DOMAINS
 from router import route
+import guardrail
 
 
 # ── LLM Adapter ───────────────────────────────────────────────────────────────
@@ -108,6 +109,13 @@ def main():
         if user_input.lower() == "clear":
             conversations = {}
             print("All conversations cleared.\n")
+            continue
+
+        # Guardrail: reject out-of-bounds / injection / harmful requests up front.
+        verdict = guardrail.check_request(user_input)
+        if not verdict["allow"]:
+            reason = f" {verdict['reason']}" if verdict["reason"] else ""
+            print(f"\033[33m[guardrail:{verdict['category']}]\033[0m I can't help with that.{reason}\n")
             continue
 
         # Route to domain

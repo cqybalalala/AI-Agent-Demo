@@ -80,6 +80,66 @@ def fetch_sheet(sheet_url: str, sheet_name: str, default_currency: str = "MYR") 
     return parse_csv(r.content, default_currency)
 
 
+def fetch_bank_charges(sheet_url: str, sheet_name: str = "BankCharge") -> dict:
+    """
+    Fetch the bank-charge rate table from a tab in the same Google Sheet.
+
+    Tab schema (one row per currency, plus a `*` fallback row):
+        Currency | Percentage | FlatRate(MYR) | Note
+        USD      | 0.05       | 25            | SWIFT + intermediary
+
+    `Percentage` is in PERCENT where 0.05 means 0.05% (not 5%). The fee is later
+    computed as `gross_myr * Percentage/100 + FlatRate`. The `Note` column is ignored.
+
+    Returns {currency_upper: {"percent": float, "flat": float}} including a "*" key.
+    Raises ValueError if the tab is missing / unreadable.
+    """
+    import httpx
+    sheet_id = _sheet_id_from_url(sheet_url)
+    csv_url = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        f"/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    )
+    r = httpx.get(csv_url, timeout=15, follow_redirects=True)
+    if r.status_code != 200:
+        raise ValueError(f"Failed to fetch sheet '{sheet_name}': HTTP {r.status_code}")
+    if "errorMessage" in r.text or len(r.text.strip()) < 10:
+        raise ValueError(f"Sheet '{sheet_name}' not found or empty. Check the tab name.")
+
+    text = r.content.decode("utf-8-sig", errors="replace")
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        raise ValueError(f"Sheet '{sheet_name}' is empty.")
+
+    header = [c.lower().strip() for c in rows[0]]
+
+    def col(*cands):
+        for cand in cands:
+            for i, h in enumerate(header):
+                if cand in h:
+                    return i
+        return None
+
+    ci_cur, ci_pct, ci_flat = col("currency", "ccy"), col("percent", "%"), col("flat", "fixed")
+    if ci_cur is None:
+        raise ValueError(f"Sheet '{sheet_name}' has no Currency column. Found: {rows[0]}")
+
+    table = {}
+    for row in rows[1:]:
+        if not any(c.strip() for c in row):
+            continue
+        cur = row[ci_cur].strip().upper() if ci_cur < len(row) else ""
+        if not cur:
+            continue
+        pct  = _clean_amount(row[ci_pct])  if ci_pct  is not None and ci_pct  < len(row) else 0.0
+        flat = _clean_amount(row[ci_flat]) if ci_flat is not None and ci_flat < len(row) else 0.0
+        table[cur] = {"percent": pct, "flat": flat}
+
+    if not table:
+        raise ValueError(f"Sheet '{sheet_name}' has no rows.")
+    return table
+
+
 def parse_csv(file_bytes: bytes, default_currency: str = "MYR") -> list[dict]:
     """
     Parse bank statement CSV bytes into a normalised list of transactions.

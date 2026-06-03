@@ -382,6 +382,31 @@ class ERPNextAdapter(ERPAdapter):
         result = self._put(f"/api/resource/{doctype}/{name}", data)
         return result.get("data", {})
 
+    def add_comment(self, doctype: str, name: str, content: str) -> dict:
+        """Attach a timeline Comment to a document — an audit annotation, NOT a
+        field change or a financial write.
+
+        Uses the SAME whitelisted method the ERPNext UI's comment box calls
+        (frappe.desk.form.utils.add_comment), which inserts the Comment with
+        ignore_permissions=True. Any logged-in user who can access the target
+        document may comment. (POSTing /api/resource/Comment directly is the wrong
+        door — it needs 'create' rights on the Comment doctype, which ordinary
+        users like an accountant don't have, even though they CAN comment in the UI.)"""
+        # Attribute the comment to the current session/token user.
+        try:
+            user = (self._get("/api/method/frappe.auth.get_logged_user") or {}).get("message", "")
+        except Exception:
+            user = ""
+        user = user or "Administrator"
+        result = self._post("/api/method/frappe.desk.form.utils.add_comment", {
+            "reference_doctype": doctype,
+            "reference_name":    name,
+            "content":           content,
+            "comment_email":     user,
+            "comment_by":        user,
+        })
+        return result.get("message", {})
+
     def submit(self, doctype: str, name: str) -> dict:
         return self._post("/api/method/frappe.client.submit", {
             "doc": {"doctype": doctype, "name": name},
