@@ -155,11 +155,12 @@ When the app opens at **http://localhost:8501**, sign in with:
 ## 🎬 How to Demo
 
 1. **Sidebar → Bank Statement:** confirm the Google Sheet URL and the **Month tab** (e.g. `May2026`).
-2. **Upload a payment proof** (PDF/image) and click **Start**.
-3. Watch the agent **extract → match → show a confidence score**.
-4. Click **Confirm** on the approval card → a **Payment Entry** is created in ERPNext and a **Reconciliation Report PDF** appears.
-5. Upload a proof that doesn’t match → get a **Discrepancy Summary PDF**.
-6. Try these **analytics prompts** in chat:
+2. **Sidebar → 💳 Bank Charge:** confirm the Google Sheet URL and the **Charge tab** (e.g. `BankCharge`) — the currency rate table that drives the SWIFT/TT bank-charge logic.
+3. **Upload a payment proof** (PDF/image) and click **Start**.
+4. Watch the agent **extract → match → show a confidence score**.
+5. Click **Confirm** on the approval card → a **Payment Entry** is created in ERPNext and a **Reconciliation Report PDF** appears.
+6. Upload a proof that doesn’t match → get a **Discrepancy Summary PDF**.
+7. Try these **analytics prompts** in chat:
 
 | Prompt | What you get |
 |---|---|
@@ -171,8 +172,8 @@ When the app opens at **http://localhost:8501**, sign in with:
 | `How much is the bank charge/forex expense in ACC-PAY-2026-00969?` | FX loss breakdown for a specific Payment Entry |
 
 > 🧪 **Sample payment proofs** for testing are included in the `samples/` folder:
-> - `GoodTransaction.png` — SGD 774.00 from NVIDIA SINGAPORE (should reconcile ✅)
-> - `WrongTransaction.png` — USD 203.52, mismatched details (should produce a Discrepancy Summary ⚠️)
+> - `HackathonGood.png` — SGD 2,597.00 from NVIDIA SINGAPORE (ref `ACC-SINV-2026-00735`, should reconcile ✅)
+> - `HackathonBad.png` — USD 1,272.00 from Micron US, mismatched details (should produce a Discrepancy Summary ⚠️)
 
 ---
 
