@@ -37,7 +37,7 @@ flowchart TD
     ERP --> ERPNEXT
 
     LLM["☁️ LLM provider<br/>OpenRouter · sponsor (TEE) · local Ollama"]
-    SHEET["📄 Bank statement (Google Sheet)"]
+    SHEET["📄 Google Sheet<br/>bank statement · bank charge rates"]
     FX["💱 FX rates (Frankfurter API)"]
     AGENT -.-> LLM
     TOOLS -.-> SHEET
@@ -50,7 +50,8 @@ flowchart TD
 flowchart LR
     A["Payment proof<br/>(PDF/image)"] --> B["Vision extract<br/>payer · amount · currency · ref"]
     B --> C["three_way_reconcile<br/>reference → fuzzy name → amount<br/>+ confidence + guard"]
-    C -->|"reconciled"| D["Human approves"] --> E["Create Payment Entry<br/>+ attach proof + book FX"] --> F["Reconciliation Report PDF"]
+    C -->|"reconciled"| D["Human approves"] --> CC["Calculate bank charges<br/>(SWIFT/TT fee from sheet)"]
+    CC --> E["Create Payment Entry<br/>+ attach proof + book FX + bank charge"] --> F["Reconciliation Report PDF"]
     C -->|"needs review"| G["Discrepancy Summary PDF"]
 ```
 
